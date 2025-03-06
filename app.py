@@ -1,4 +1,15 @@
 import streamlit as st
+
+# Debug: Check if we can read secrets
+st.write("🔍 Checking Streamlit Secrets...")
+
+if "google" in st.secrets:
+    st.success("✅ Streamlit Secrets are loaded correctly!")
+    st.json(st.secrets["google"])  # Display secrets to confirm they are available
+else:
+    st.error("❌ Streamlit Secrets are NOT found!")
+
+import streamlit as st
 import pandas as pd
 import calendar
 import matplotlib.pyplot as plt
