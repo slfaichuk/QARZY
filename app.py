@@ -1,127 +1,123 @@
-import streamlit as st
-
-# Debug: Check if we can read secrets
-st.write("🔍 Checking Streamlit Secrets...")
-
-if "google" in st.secrets:
-    st.success("✅ Streamlit Secrets are loaded correctly!")
-    st.json(st.secrets["google"])  # Display secrets to confirm they are available
-else:
-    st.error("❌ Streamlit Secrets are NOT found!")
-
-import streamlit as st
+ import streamlit as st
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
 import calendar
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import datetime
+
+# --- Load Google Sheets credentials from Streamlit Secrets ---
+def get_google_creds():
+    credentials_info = st.secrets["google"]
+    return Credentials.from_service_account_info(credentials_info)
+
+# --- Google Sheets Setup ---
+SHEET_ID = "19lV8X78x7sXJNdgKNqMhZuLdZRk4wnvMS3__mIFqStQ"  # Your real Google Sheet ID
+SHEET_NAME = "Sheet1"
+
+def load_data():
+    try:
+        creds = get_google_creds()
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+        data = sheet.get_all_records()
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"❌ Failed to load data: {e}")
+        return pd.DataFrame()
+
+def save_data(df):
+    try:
+        creds = get_google_creds()
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_NAME)
+
+        sheet.clear()
+        sheet.update([df.columns.values.tolist()] + df.values.tolist())
+        st.success("✅ Data saved successfully to Google Sheets!")
+    except Exception as e:
+        st.error(f"❌ Failed to save data: {e}")
 
 # --- Streamlit Page Setup ---
 st.set_page_config(page_title="Turo Vehicle Calendar", layout="wide")
-
 st.title("📅 Vehicle Booking Calendar (Turo)")
 
 # --- Sidebar for Navigation ---
-tab1, tab2 = st.tabs(["📂 Upload CSV Files", "📆 View Calendar"])
+tab1, tab2 = st.tabs(["📂 Upload CSV Files", "📅 View Calendar"])
 
-# --- CSV Upload Section (in a separate tab) ---
+# --- CSV Upload Section ---
 with tab1:
     st.header("📂 Upload CSV Files")
     uploaded_files = st.file_uploader("Upload your Turo CSV exports", type=["csv"], accept_multiple_files=True)
-    
-    if uploaded_files:
-        st.success("✅ Files uploaded successfully! Switch to 'View Calendar' tab.")
 
-# --- Calendar Section ---
-with tab2:
     if uploaded_files:
-        # Read all CSV files and combine into one DataFrame
         df_list = [pd.read_csv(file) for file in uploaded_files]
         df = pd.concat(df_list)
 
         # Convert date columns to datetime
-        df["Trip start"] = pd.to_datetime(df["Trip start"], errors='coerce')
-        df["Trip end"] = pd.to_datetime(df["Trip end"], errors='coerce')
+        df["Trip start"] = pd.to_datetime(df["Trip start"], errors="coerce")
+        df["Trip end"] = pd.to_datetime(df["Trip end"], errors="coerce")
         df["Total earnings"] = df["Total earnings"].replace('[\$,]', '', regex=True).astype(float)
 
-        # --- Filters ---
-        vehicles = df["Vehicle"].unique()
-        selected_vehicle = st.sidebar.selectbox("🚗 Select a Vehicle", vehicles)
+        # Save to Google Sheets
+        save_data(df)
 
-        years = df["Trip start"].dt.year.unique()
-        selected_year = st.sidebar.selectbox("📅 Select a Year", years, index=len(years)-1)
+        st.success("✅ Files uploaded successfully! Switch to 'View Calendar' tab.")
 
-        months = list(calendar.month_name[1:])
-        selected_month = st.sidebar.selectbox("📆 Select a Month", months, index=2)
-        month_num = months.index(selected_month) + 1
+# --- Calendar Section ---
+with tab2:
+    df = load_data()
 
-        # --- Fix Filtering Logic ---
-        filtered_df = df[
-            (df["Vehicle"] == selected_vehicle) &
-            (~df["Trip status"].isin(["Guest cancellation", "Host cancellation"])) &  # Ignore cancellations
-            (
-                (df["Trip start"].dt.year == selected_year) & (df["Trip start"].dt.month == month_num) |  # Trip starts in the month
-                (df["Trip end"].dt.year == selected_year) & (df["Trip end"].dt.month == month_num) |  # Trip ends in the month
-                ((df["Trip start"] < pd.Timestamp(selected_year, month_num, 1)) &  # Trip started before this month
-                 (df["Trip end"] > pd.Timestamp(selected_year, month_num, calendar.monthrange(selected_year, month_num)[1])))  # Trip ends after this month
-            )
-        ]
+    if not df.empty:
+        # Filter for a specific vehicle
+        vehicle_options = df["Vehicle"].unique()
+        selected_vehicle = st.selectbox("🚗 Select a Vehicle:", vehicle_options)
 
-        # --- Calendar Display ---
-        st.write(f"### 📅 {selected_vehicle} - {selected_month} {selected_year}")
+        # Filter for a specific month
+        today = datetime.date.today()
+        months = [calendar.month_name[i] for i in range(1, 13)]
+        selected_month = st.selectbox("📅 Select Month:", months, index=today.month - 1)
 
-        cal = calendar.monthcalendar(selected_year, month_num)
+        # Get year dynamically
+        selected_year = today.year
+
+        # Filter data
+        df_filtered = df[(df["Vehicle"] == selected_vehicle)]
+        df_filtered = df_filtered[(df_filtered["Trip start"].dt.year == selected_year) & 
+                                  (df_filtered["Trip start"].dt.month == months.index(selected_month) + 1)]
+
+        # Create Calendar
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.set_xticks(range(7))
-        ax.set_xticklabels(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+        ax.set_xticks(range(1, 32))
+        ax.set_yticks([])
+        ax.set_xticklabels(range(1, 32))
 
-        # Define colors for different statuses
-        status_colors = {
+        # Define colors for statuses
+        color_map = {
             "Completed": "lightblue",
-            "In-progress": "lightgreen",
+            "In-progress": "green",
             "Booked": "yellow"
         }
 
-        # Loop through calendar days
-        for week_idx, week in enumerate(cal):
-            for day_idx, day in enumerate(week):
-                if day == 0:
-                    continue  # Skip empty days
+        # Plot each trip
+        for _, row in df_filtered.iterrows():
+            trip_start = row["Trip start"].day
+            trip_end = row["Trip end"].day
+            color = color_map.get(row["Status"], "white")
 
-                day_date = pd.Timestamp(selected_year, month_num, day)
-                day_trips = filtered_df[(filtered_df["Trip start"] <= day_date) & (filtered_df["Trip end"] >= day_date)]
+            ax.barh(0, trip_end - trip_start + 1, left=trip_start, color=color, edgecolor="black")
 
-                if not day_trips.empty:
-                    # If multiple bookings exist on the same day, split the cell
-                    num_trips = len(day_trips)
-                    for i, (_, trip) in enumerate(day_trips.iterrows()):
-                        total_days = (trip["Trip end"] - trip["Trip start"]).days + 1
-                        daily_price = trip["Total earnings"] / total_days  # Divide earnings over trip duration
-                        color = status_colors.get(trip["Trip status"], "white")
+            # Show price inside the bar
+            daily_rate = row["Total earnings"] / (trip_end - trip_start + 1)
+            for day in range(trip_start, trip_end + 1):
+                ax.text(day, 0, f"${daily_rate:.0f}", ha="center", va="center", fontsize=8, color="black")
 
-                        # Adjust cell for multiple bookings
-                        y_offset = (i / num_trips) if num_trips > 1 else 0
-                        height = (1 / num_trips) if num_trips > 1 else 1
+        # Add legend
+        legend_patches = [mpatches.Patch(color=color, label=status) for status, color in color_map.items()]
+        ax.legend(handles=legend_patches, loc="upper right")
 
-                        ax.add_patch(plt.Rectangle((day_idx, week_idx + y_offset), 1, height, color=color, edgecolor="black"))
-                        ax.text(day_idx + 0.5, week_idx + y_offset + (height / 2), f"${daily_price:.2f}", ha="center", va="center", fontsize=9)
-
-        ax.set_xlim(0, 7)
-        ax.set_ylim(len(cal), 0)
-        plt.title(f"Booking Calendar - {selected_vehicle} ({selected_month}/{selected_year})")
-        plt.grid(axis="x", linestyle="--", alpha=0.7)
         st.pyplot(fig)
 
-        # --- Legend for Colors ---
-        st.write("### Booking Status Legend")
-        legend_patches = [
-            mpatches.Patch(color="lightblue", label="Completed"),
-            mpatches.Patch(color="lightgreen", label="In-progress"),
-            mpatches.Patch(color="yellow", label="Booked")
-        ]
-        fig_legend, ax_legend = plt.subplots(figsize=(4, 1))
-        ax_legend.legend(handles=legend_patches, loc="center")
-        ax_legend.axis("off")
-        st.pyplot(fig_legend)
-
     else:
-        st.warning("🔺 Please upload CSV files in the 'Upload CSV Files' tab first.")
+        st.warning("⚠️ No data available. Please upload CSV files first.")
